@@ -15,6 +15,7 @@ Since Anthropic's models are currently state-of-the-art on code, we used Claude 
   - Sequential thinking for complex problem-solving
 - Prompt template + system prompt from our SWE-bench submission.
 - Integration with Anthropic's Claude for core agent and OpenAI models for ensembling
+- Support for Databricks-hosted Claude models
 - Command approval management for safe execution
 - Majority vote ensembler for selecting the best solution from multiple candidates
 - Support for running agent in a Docker container
@@ -27,6 +28,7 @@ Since Anthropic's models are currently state-of-the-art on code, we used Claude 
 - [Docker](https://www.docker.com/) (We tested with `Docker version 26.1.3, build 26.1.3-0ubuntu1~22.04.1`.)
 - Anthropic API key (for Claude models)
 - OpenAI API key (for OpenAI models)
+- Databricks workspace and token (optional, for Databricks-hosted Claude models)
 
 ### Setup
 
@@ -49,6 +51,10 @@ Since Anthropic's models are currently state-of-the-art on code, we used Claude 
 
    # For OpenAI models
    export OPENAI_API_KEY=your_openai_api_key_here
+
+   # For Databricks-hosted Claude models (optional)
+   export DATABRICKS_HOST=https://your-databricks-workspace.cloud.databricks.com
+   export DATABRICKS_TOKEN=your_databricks_personal_access_token
    ```
 
 ## Ways to use this repo
@@ -76,10 +82,19 @@ This will start an interactive session where you can communicate with the agent 
 - `--needs-permission`: Whether to require permission before executing commands (default: False)
 - `--use-container-workspace`: Path to the shared volume that is mounted into the Docker container. This must be set if you are using `--docker-container-id`. (default: None)
 - `--docker-container-id`: ID of the Docker container to use. This must be set if you are using `--use-container-workspace`. (default: None)
+- `--client-type`: Type of LLM client to use. Options are "anthropic-direct", "databricks-claude", or "openai-direct" (default: "anthropic-direct")
+- `--endpoint-name`: Name of the Databricks serving endpoint (only used with databricks-claude client) (default: "databricks-claude-3-7-sonnet")
 
-Example:
+Examples:
+
+Using Anthropic API directly:
 ```bash
 python cli.py --workspace /path/to/project --problem-statement "Fix the login issue"
+```
+
+Using Databricks-hosted Claude:
+```bash
+python cli.py --client-type databricks-claude --endpoint-name databricks-claude-3-7-sonnet
 ```
 
 ### Non-interactive Mode
@@ -98,6 +113,28 @@ volume as well as the Docker container ID:
 ```bash
 python cli.py --use-container-workspace --docker-container-id <container_id> --workspace /path/to/docker/volume
 ```
+
+### Using Databricks-hosted Claude
+
+To use Claude models hosted on Databricks:
+
+1. Make sure you have set the required environment variables:
+   ```bash
+   export DATABRICKS_HOST=https://your-databricks-workspace.cloud.databricks.com
+   export DATABRICKS_TOKEN=your_databricks_personal_access_token
+   ```
+
+2. Run the CLI with the `databricks-claude` client type:
+   ```bash
+   python cli.py --client-type databricks-claude
+   ```
+
+3. Optionally, specify a different endpoint name:
+   ```bash
+   python cli.py --client-type databricks-claude --endpoint-name your-custom-endpoint-name
+   ```
+
+The Databricks Claude integration uses the OpenAI client format with the base URL pointing to your Databricks serving endpoint.
 
 ## Usage (SWE-bench mode)
 
