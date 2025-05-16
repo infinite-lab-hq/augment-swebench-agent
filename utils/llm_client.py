@@ -1,11 +1,11 @@
-"""LLM client for Anthropic models."""
+"""LLM client for Anthropic models and Databricks Claude."""
 
 import json
 import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from dataclasses_json import DataClassJsonMixin
 import anthropic
 import openai
@@ -594,11 +594,338 @@ class OpenAIDirectClient(LLMClient):
         return augment_messages, message_metadata
 
 
+class DatabricksClaudeClient(LLMClient):
+    """Client for Databricks Claude using OpenAI client interface."""
+
+    def __init__(
+        self,
+        model_name="claude-3-7-sonnet-20250219",
+        max_retries=2,
+        use_caching=True,
+        use_low_qos_server: bool = False,
+        thinking_tokens: int = 0,
+        endpoint_name: str = "databricks-claude-3-7-sonnet",
+    ):
+        """Initialize the Databricks Claude client.
+
+        Args:
+            model_name: The model name to use
+            max_retries: Maximum number of retries for API calls
+            use_caching: Whether to use prompt caching
+            use_low_qos_server: Whether to use a low QoS server
+            thinking_tokens: Number of tokens to allocate for thinking
+            endpoint_name: The name of the Databricks serving endpoint
+        """
+        # Get Databricks credentials from environment variables
+        self.databricks_host = os.getenv("DATABRICKS_HOST")
+        self.databricks_token = os.getenv("DATABRICKS_TOKEN")
+
+        if not self.databricks_host or not self.databricks_token:
+            raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN environment variables must be set")
+
+        # Store parameters
+        self.model_name = model_name
+        self.max_retries = max_retries
+        self.use_caching = use_caching
+        self.thinking_tokens = thinking_tokens
+        self.endpoint_name = endpoint_name
+        self.prompt_caching_headers = {"anthropic-beta": "prompt-caching-2024-07-31"}
+
+        # Initialize the Databricks client
+        self._initialize_client()
+
+    def _initialize_client(self):
+        """Initialize the OpenAI client for Databricks."""
+        try:
+            # Try to import the openai module
+            print("Trying to import openai...")
+            import openai
+            from openai import OpenAI
+            print("Successfully imported openai")
+
+            # Initialize the OpenAI client
+            # The base URL should match exactly what's in the example code
+            base_url = f"{self.databricks_host}/serving-endpoints"
+            print(f"Using base URL: {base_url}")
+
+            self.client = OpenAI(
+                api_key=self.databricks_token,
+                base_url=base_url
+            )
+            print("Successfully initialized OpenAI client for Databricks")
+
+        except ImportError as e:
+            print(f"Error importing openai: {e}")
+            print("Trying to install openai package...")
+            import subprocess
+            import sys
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "openai>=1.0.0"])
+                print("Successfully installed openai package!")
+
+                # Try to import again
+                import openai
+                from openai import OpenAI
+                print("Successfully imported openai after installation")
+
+                # Initialize the OpenAI client
+                # The base URL should match exactly what's in the example code
+                base_url = f"{self.databricks_host}/serving-endpoints"
+                print(f"Using base URL: {base_url}")
+
+                self.client = OpenAI(
+                    api_key=self.databricks_token,
+                    base_url=base_url
+                )
+                print("Successfully initialized OpenAI client for Databricks")
+
+            except Exception as e:
+                print(f"Failed to install openai package: {e}")
+                raise ImportError("The openai package could not be installed. Please install it manually: pip install openai>=1.0.0")
+        except Exception as e:
+            print(f"Error initializing OpenAI client: {e}")
+            raise
+
+    def generate(
+        self,
+        messages: LLMMessages,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        tools: list[ToolParam] = [],
+        tool_choice: dict[str, str] | None = None,
+        thinking_tokens: int | None = None,
+    ) -> Tuple[list[AssistantContentBlock], dict[str, Any]]:
+        """Generate responses using Databricks Claude endpoint.
+
+        Args:
+            messages: A list of messages.
+            max_tokens: The maximum number of tokens to generate.
+            system_prompt: A system prompt.
+            temperature: The temperature.
+            tools: A list of tools.
+            tool_choice: A tool choice.
+            thinking_tokens: Number of tokens to allocate for thinking.
+
+        Returns:
+            A generated response.
+        """
+        # Convert messages to OpenAI format
+        openai_messages = []
+
+        # Add system prompt if provided
+        if system_prompt:
+            openai_messages.append({"role": "system", "content": system_prompt})
+
+        # Convert message blocks to OpenAI format
+        for idx, message_list in enumerate(messages):
+            role = "user" if idx % 2 == 0 else "assistant"
+            message_content = ""
+
+            # Combine all text content for this role
+            for message in message_list:
+                if str(type(message)) == str(TextPrompt) or str(type(message)) == str(TextResult):
+                    if str(type(message)) == str(TextPrompt):
+                        message = cast(TextPrompt, message)
+                    else:
+                        message = cast(TextResult, message)
+
+                    if message_content:
+                        message_content += "\n\n"
+                    message_content += message.text
+                elif str(type(message)) == str(ToolCall):
+                    # For tool calls, we'll add them as function calls in a separate step
+                    pass
+                elif str(type(message)) == str(ToolFormattedResult):
+                    # For tool results, we'll add them as function results
+                    message = cast(ToolFormattedResult, message)
+                    if message_content:
+                        message_content += "\n\n"
+                    message_content += f"Tool result: {message.tool_output}"
+
+            # Only add the message if it has content
+            if message_content:
+                openai_messages.append({"role": role, "content": message_content})
+
+        # Prepare extra parameters for thinking
+        extra_params = {}
+        if thinking_tokens and thinking_tokens > 0:
+            extra_params["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_tokens
+            }
+
+        # Prepare tools if provided
+        openai_tools = None
+        openai_tool_choice = None
+        if tools:
+            openai_tools = []
+            for tool in tools:
+                openai_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema
+                    }
+                })
+
+            # Set tool_choice if provided
+            if tool_choice:
+                if tool_choice["type"] == "any":
+                    openai_tool_choice = "auto"
+                elif tool_choice["type"] == "auto":
+                    openai_tool_choice = "auto"
+                elif tool_choice["type"] == "tool":
+                    openai_tool_choice = {
+                        "type": "function",
+                        "function": {"name": tool_choice["name"]}
+                    }
+
+        # Make the API request with retries
+        response = None
+        for retry in range(self.max_retries):
+            try:
+                # Call Databricks serving endpoint using OpenAI client
+                # The model parameter should be the endpoint name
+                # This matches the example code exactly
+                completion_args = {
+                    "model": self.endpoint_name,
+                    "messages": openai_messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+
+                # Add tools and tool_choice if provided
+                if openai_tools:
+                    completion_args["tools"] = openai_tools
+                if openai_tool_choice:
+                    completion_args["tool_choice"] = openai_tool_choice
+
+                # Add extra parameters for thinking if provided
+                if extra_params:
+                    completion_args["extra_body"] = extra_params
+
+                print(f"Sending request to Databricks Claude endpoint: {completion_args}")
+                print(f"Base URL: {self.client.base_url}")
+                response = self.client.chat.completions.create(**completion_args)
+                print("Request successful!")
+                break
+            except Exception as e:
+                if retry == self.max_retries - 1:
+                    print(f"Failed Databricks request after {retry + 1} retries")
+                    raise e
+                else:
+                    print(f"Retrying LLM request: {retry + 1}/{self.max_retries}")
+                    # Sleep 4-6 seconds with jitter to avoid thundering herd
+                    time.sleep(5 * random.uniform(0.8, 1.2))
+
+        # Convert response back to Augment format
+        augment_messages = []
+        assert response is not None
+
+        print(f"Databricks response: {response}")
+
+        try:
+            # Parse the response
+            if hasattr(response, 'choices') and response.choices:
+                for choice in response.choices:
+                    if hasattr(choice, 'message') and choice.message:
+                        # Handle text content
+                        if hasattr(choice.message, 'content') and choice.message.content:
+                            augment_messages.append(TextResult(text=choice.message.content))
+
+                        # Handle tool calls
+                        if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                            for tool_call in choice.message.tool_calls:
+                                if tool_call.type == 'function':
+                                    augment_messages.append(
+                                        ToolCall(
+                                            tool_call_id=tool_call.id,
+                                            tool_name=tool_call.function.name,
+                                            tool_input=json.loads(tool_call.function.arguments),
+                                        )
+                                    )
+
+            # If we couldn't parse the response in a structured way, try to extract any text
+            if not augment_messages:
+                # Fallback for unexpected response format
+                warning_msg = "\n".join(
+                    ["!" * 80, "WARNING: Unexpected response format", "!" * 80]
+                )
+                print(warning_msg)
+                print(f"Response content: {response}")
+
+                # Try to extract text from the first choice
+                if hasattr(response, 'choices') and response.choices:
+                    choice = response.choices[0]
+                    if hasattr(choice, 'message') and choice.message:
+                        if hasattr(choice.message, 'content') and choice.message.content:
+                            augment_messages.append(TextResult(text=choice.message.content))
+
+                # Last resort: convert the entire response to a string
+                if not augment_messages:
+                    augment_messages.append(TextResult(text=str(response)))
+        except Exception as e:
+            print(f"Error parsing Databricks response: {e}")
+            # Last resort fallback
+            augment_messages.append(TextResult(text=f"Error parsing response: {str(response)}"))
+
+        # Create metadata from response
+        input_tokens = 0
+        output_tokens = 0
+
+        try:
+            if hasattr(response, 'usage'):
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
+        except Exception as e:
+            print(f"Error extracting token usage: {e}")
+
+        message_metadata = {
+            "raw_response": response,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+
+        return augment_messages, message_metadata
+
+
 def get_client(client_name: str, **kwargs) -> LLMClient:
     """Get a client for a given client name."""
     if client_name == "anthropic-direct":
         return AnthropicDirectClient(**kwargs)
     elif client_name == "openai-direct":
         return OpenAIDirectClient(**kwargs)
+    elif client_name == "databricks-claude":
+        try:
+            # Try to import the openai module to check if it's installed
+            import sys
+            print("\n=== Python Environment Information ===")
+            print(f"Python executable: {sys.executable}")
+            print(f"Python version: {sys.version}")
+
+            # Check for virtual environments
+            if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+                print(f"Running in a virtual environment: {sys.prefix}")
+            else:
+                print("Not running in a virtual environment")
+
+            # Try to import openai
+            print("\nTrying to import openai...")
+            import openai
+            from openai import OpenAI
+            print("Successfully imported openai")
+
+            # If we get here, the import was successful
+            print("\nSuccessfully imported all required modules. Using DatabricksClaudeClient.")
+            return DatabricksClaudeClient(**kwargs)
+        except ImportError as e:
+            print(f"\nImportError: {e}")
+            print("\nWARNING: openai package is not installed or cannot be imported.")
+            print("To use the Databricks Claude client, please install the openai package:")
+            print(f"{sys.executable} -m pip install openai>=1.0.0")
+            print("\nFalling back to direct Anthropic API...")
+            return AnthropicDirectClient(**kwargs)
     else:
         raise ValueError(f"Unknown client name: {client_name}")

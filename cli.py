@@ -73,6 +73,19 @@ def main():
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--client-type",
+        type=str,
+        default="anthropic-direct",
+        choices=["anthropic-direct", "databricks-claude", "openai-direct"],
+        help="Type of LLM client to use (default: anthropic-direct)",
+    )
+    parser.add_argument(
+        "--endpoint-name",
+        type=str,
+        default="databricks-claude-3-7-sonnet",
+        help="Name of the Databricks serving endpoint (only used with databricks-claude client)",
+    )
 
     args = parser.parse_args()
 
@@ -86,11 +99,28 @@ def main():
     else:
         logger_for_agent_logs.propagate = False
 
-    # Check if ANTHROPIC_API_KEY is set
-    if "ANTHROPIC_API_KEY" not in os.environ:
+    # Check if required environment variables are set
+    if args.client_type == "anthropic-direct" and "ANTHROPIC_API_KEY" not in os.environ:
         print("Error: ANTHROPIC_API_KEY environment variable is not set.")
         print("Please set it to your Anthropic API key.")
         sys.exit(1)
+    elif args.client_type == "databricks-claude":
+        # Check if openai is installed
+        try:
+            import openai
+        except ImportError:
+            print("Warning: openai package is not installed.")
+            print("To use the Databricks Claude client, please install the openai package:")
+            print("pip install openai>=1.0.0")
+            print("Falling back to direct Anthropic API...")
+            args.client_type = "anthropic-direct"
+
+        # If we're still using databricks-claude, check for environment variables
+        if args.client_type == "databricks-claude" and ("DATABRICKS_HOST" not in os.environ or "DATABRICKS_TOKEN" not in os.environ):
+            print("Error: DATABRICKS_HOST and DATABRICKS_TOKEN environment variables must be set for Databricks Claude client.")
+            print("Please set them to your Databricks workspace URL and personal access token.")
+            print("Falling back to direct Anthropic API...")
+            args.client_type = "anthropic-direct"
 
     # Initialize console
     console = Console()
@@ -113,10 +143,18 @@ def main():
         )
 
     # Initialize LLM client
+    client_kwargs = {
+        "model_name": "claude-3-7-sonnet-20250219",
+        "use_caching": True,
+    }
+
+    # Add endpoint_name for Databricks Claude client
+    if args.client_type == "databricks-claude":
+        client_kwargs["endpoint_name"] = args.endpoint_name
+
     client = get_client(
-        "anthropic-direct",
-        model_name="claude-3-7-sonnet-20250219",
-        use_caching=True,
+        args.client_type,
+        **client_kwargs
     )
 
     # Initialize workspace manager
